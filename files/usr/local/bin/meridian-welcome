@@ -1,146 +1,231 @@
 #!/usr/bin/env python3
 """
-meridian-welcome
-Pantalla de bienvenida de Meridian OS. Se abre al iniciar sesion y ofrece
-las acciones mas comunes: instalar el sistema, conectarse a una red,
-abrir el navegador o la suite de oficina.
+meridian-welcome — Pantalla de bienvenida de Meridian OS.
+
+Se abre automaticamente al iniciar sesion y ofrece las acciones mas comunes
+de la sesion en vivo: instalar el sistema, conectarse a una red, navegar o
+abrir la suite de oficina.
 """
+
 import os
+import shutil
 import subprocess
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 
+LOGO = "/etc/calamares/branding/meridian/logo.png"
 AUTOSTART = os.path.expanduser("~/.config/autostart/meridian-welcome.desktop")
+ORIGEN_AUTOSTART = "/usr/share/applications/meridian-welcome.desktop"
 
 CSS = b"""
-window { background-color: #0d1526; }
-label.title { color: #ffffff; font-size: 26px; font-weight: bold; }
-label.subtitle { color: #8fa6c4; font-size: 13px; }
-button.card {
+window.meridian            { background-color: #0b1322; }
+.titulo                    { color: #ffffff; font-size: 21px; font-weight: 700; }
+.entradilla                { color: #8ba0be; font-size: 12px; }
+.pie                       { color: #6f84a2; font-size: 11px; }
+
+button.tarjeta {
     background-image: none;
-    background-color: #17233c;
-    border: 1px solid #253császár;
-    border-radius: 8px;
+    background-color: #141f33;
+    border: 1px solid #223350;
+    border-radius: 10px;
     padding: 14px;
+    transition: 160ms ease;
 }
+button.tarjeta:hover {
+    background-color: #1a2b47;
+    border-color: #3d8bfd;
+}
+button.tarjeta:active   { background-color: #16253d; }
+.tarjeta-titulo         { color: #ffffff; font-size: 13px; font-weight: 600; }
+.tarjeta-texto          { color: #8ba0be; font-size: 11px; }
+
+button.cerrar {
+    background-image: none;
+    background-color: #1b2840;
+    border: 1px solid #223350;
+    border-radius: 7px;
+    color: #cfdcef;
+    padding: 6px 16px;
+    font-size: 12px;
+}
+button.cerrar:hover { background-color: #24344f; }
+
+checkbutton  { color: #6f84a2; font-size: 11px; }
 """
 
-# Nota: la linea de borde de arriba se corrige en tiempo de ejecucion.
-CSS = CSS.replace("#253császár".encode(), b"#25324d")
-
+# (titulo, descripcion, comando, binario a comprobar)
 ACCIONES = [
     ("Instalar Meridian OS",
      "Copia el sistema a tu disco duro.",
-     ["calamares"]),
+     ["pkexec", "calamares"], "calamares"),
     ("Conectar a una red",
      "Configura WiFi o red cableada.",
-     ["nm-connection-editor"]),
+     ["nm-connection-editor"], "nm-connection-editor"),
     ("Navegar por internet",
-     "Abre Firefox.",
-     ["firefox-esr"]),
+     "Abre Firefox ESR.",
+     ["firefox-esr"], "firefox-esr"),
     ("Abrir LibreOffice",
      "Documentos, hojas de calculo y presentaciones.",
-     ["libreoffice"]),
+     ["libreoffice"], "libreoffice"),
 ]
 
 
-class Welcome(Gtk.Window):
+class Bienvenida(Gtk.Window):
+
     def __init__(self):
         super().__init__(title="Bienvenido a Meridian OS")
-        self.set_default_size(620, 440)
+        self.get_style_context().add_class("meridian")
+        self.set_default_size(560, 430)
         self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_resizable(False)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        if os.path.exists(LOGO):
+            try:
+                self.set_icon_from_file(LOGO)
+            except GLib.Error:
+                pass
 
-        caja = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        caja.set_margin_top(28)
-        caja.set_margin_bottom(22)
-        caja.set_margin_start(28)
-        caja.set_margin_end(28)
+        self._cargar_css()
+
+        caja = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        caja.set_margin_top(26)
+        caja.set_margin_bottom(20)
+        caja.set_margin_start(26)
+        caja.set_margin_end(26)
         self.add(caja)
 
-        titulo = Gtk.Label(label="Bienvenido a Meridian OS")
-        titulo.get_style_context().add_class("title")
-        titulo.set_xalign(0)
-        caja.pack_start(titulo, False, False, 0)
+        caja.pack_start(self._cabecera(), False, False, 0)
 
-        sub = Gtk.Label(label="Estas usando el sistema en modo de prueba. "
-                              "Nada se guarda hasta que lo instales.")
-        sub.get_style_context().add_class("subtitle")
-        sub.set_xalign(0)
-        sub.set_line_wrap(True)
-        caja.pack_start(sub, False, False, 0)
+        entradilla = Gtk.Label(
+            label="Estas en una sesion en vivo: puedes probar todo sin tocar "
+                  "tu disco. Nada se guarda hasta que instales el sistema.")
+        entradilla.get_style_context().add_class("entradilla")
+        entradilla.set_xalign(0)
+        entradilla.set_line_wrap(True)
+        entradilla.set_max_width_chars(58)
+        entradilla.set_margin_top(6)
+        entradilla.set_margin_bottom(20)
+        caja.pack_start(entradilla, False, False, 0)
 
-        grid = Gtk.Grid(column_spacing=12, row_spacing=12,
-                        column_homogeneous=True)
-        caja.pack_start(grid, True, True, 8)
+        rejilla = Gtk.Grid(column_spacing=11, row_spacing=11,
+                           column_homogeneous=True)
+        caja.pack_start(rejilla, True, True, 0)
+        for i, accion in enumerate(ACCIONES):
+            rejilla.attach(self._tarjeta(*accion), i % 2, i // 2, 1, 1)
 
-        for i, (nombre, desc, cmd) in enumerate(ACCIONES):
-            grid.attach(self._tarjeta(nombre, desc, cmd), i % 2, i // 2, 1, 1)
-
-        pie = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        caja.pack_start(pie, False, False, 0)
-
-        self.check = Gtk.CheckButton(label="No mostrar esto al iniciar")
-        self.check.get_style_context().add_class("subtitle")
-        self.check.connect("toggled", self._alternar_autostart)
-        pie.pack_start(self.check, False, False, 0)
-
-        cerrar = Gtk.Button(label="Cerrar")
-        cerrar.connect("clicked", lambda _w: Gtk.main_quit())
-        pie.pack_end(cerrar, False, False, 0)
-
+        caja.pack_start(self._pie(), False, False, 0)
         self.connect("destroy", Gtk.main_quit)
 
-    def _tarjeta(self, nombre, desc, cmd):
+    # ---------- construccion de la interfaz ----------
+
+    def _cargar_css(self):
+        proveedor = Gtk.CssProvider()
+        proveedor.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), proveedor,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def _cabecera(self):
+        fila = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+
+        if os.path.exists(LOGO):
+            try:
+                px = GdkPixbuf.Pixbuf.new_from_file_at_size(LOGO, 46, 46)
+                fila.pack_start(Gtk.Image.new_from_pixbuf(px), False, False, 0)
+            except GLib.Error:
+                pass
+
+        textos = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        titulo = Gtk.Label(label="Bienvenido a Meridian OS")
+        titulo.get_style_context().add_class("titulo")
+        titulo.set_xalign(0)
+        version = Gtk.Label(label="1.0  ·  Vanguard")
+        version.get_style_context().add_class("pie")
+        version.set_xalign(0)
+        textos.pack_start(titulo, False, False, 0)
+        textos.pack_start(version, False, False, 0)
+
+        fila.pack_start(textos, False, False, 0)
+        return fila
+
+    def _tarjeta(self, titulo, descripcion, comando, binario):
         boton = Gtk.Button()
-        boton.get_style_context().add_class("card")
+        boton.get_style_context().add_class("tarjeta")
 
         interior = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        t = Gtk.Label(label=nombre)
+
+        t = Gtk.Label(label=titulo)
+        t.get_style_context().add_class("tarjeta-titulo")
         t.set_xalign(0)
-        t.set_markup('<span foreground="#ffffff" weight="bold">%s</span>' % nombre)
-        d = Gtk.Label(label=desc)
+
+        d = Gtk.Label(label=descripcion)
+        d.get_style_context().add_class("tarjeta-texto")
         d.set_xalign(0)
         d.set_line_wrap(True)
-        d.set_markup('<span foreground="#8fa6c4" size="small">%s</span>' % desc)
+        d.set_max_width_chars(26)
+
         interior.pack_start(t, False, False, 0)
         interior.pack_start(d, False, False, 0)
         boton.add(interior)
 
-        boton.connect("clicked", lambda _w: self._lanzar(cmd))
+        boton.connect("clicked", lambda _w: self._lanzar(comando, binario, titulo))
         return boton
 
-    def _lanzar(self, cmd):
-        try:
-            subprocess.Popen(cmd)
-        except FileNotFoundError:
-            dialogo = Gtk.MessageDialog(
-                transient_for=self, modal=True,
-                message_type=Gtk.MessageType.WARNING,
-                buttons=Gtk.ButtonsType.OK,
-                text="No se encontro %s en el sistema." % cmd[0])
-            dialogo.run()
-            dialogo.destroy()
+    def _pie(self):
+        fila = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        fila.set_margin_top(18)
 
-    def _alternar_autostart(self, boton):
-        if boton.get_active():
-            if os.path.exists(AUTOSTART):
-                os.remove(AUTOSTART)
-        else:
-            origen = "/usr/share/applications/meridian-welcome.desktop"
-            if os.path.exists(origen) and not os.path.exists(AUTOSTART):
+        self.check = Gtk.CheckButton(label="No mostrar esto al iniciar sesion")
+        self.check.set_active(not os.path.exists(AUTOSTART))
+        self.check.connect("toggled", self._alternar_inicio)
+        fila.pack_start(self.check, False, False, 0)
+
+        cerrar = Gtk.Button(label="Cerrar")
+        cerrar.get_style_context().add_class("cerrar")
+        cerrar.connect("clicked", lambda _w: Gtk.main_quit())
+        fila.pack_end(cerrar, False, False, 0)
+        return fila
+
+    # ---------- acciones ----------
+
+    def _lanzar(self, comando, binario, titulo):
+        if shutil.which(binario) is None:
+            self._aviso("No se encontro «%s» en el sistema.\n\n"
+                        "Comprueba que el paquete correspondiente este "
+                        "instalado en la imagen." % binario)
+            return
+        try:
+            subprocess.Popen(comando)
+        except OSError as err:
+            self._aviso("No se pudo abrir %s.\n\n%s" % (titulo, err))
+
+    def _aviso(self, mensaje):
+        dialogo = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK, text=mensaje)
+        dialogo.run()
+        dialogo.destroy()
+
+    def _alternar_inicio(self, boton):
+        try:
+            if boton.get_active():
+                if os.path.exists(AUTOSTART):
+                    os.remove(AUTOSTART)
+            elif os.path.exists(ORIGEN_AUTOSTART):
                 os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
-                with open(origen) as f_in, open(AUTOSTART, "w") as f_out:
-                    f_out.write(f_in.read())
+                shutil.copyfile(ORIGEN_AUTOSTART, AUTOSTART)
+        except OSError:
+            pass
+
+
+def main():
+    ventana = Bienvenida()
+    ventana.show_all()
+    Gtk.main()
 
 
 if __name__ == "__main__":
-    Welcome().show_all()
-    Gtk.main()
+    main()
