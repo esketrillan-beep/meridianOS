@@ -1,1 +1,237 @@
+name: Build Meridian OS
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # Construimos DENTRO de un contenedor Debian bookworm real, no en el
+    # runner de Ubuntu. Esto nos da el live-build moderno de Debian, que
+    # maneja isolinux, GRUB y UEFI correctamente por si solo.
+    container:
+      image: debian:bookworm
+      options: --privileged
+
+    steps:
+
+      # ------------------------------------------------------------------
+      - name: Instalar dependencias de construccion
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            live-build debootstrap squashfs-tools xorriso \
+            isolinux syslinux-common syslinux-efi \
+            grub-pc-bin grub-efi-amd64-bin grub-common \
+            mtools dosfstools ca-certificates curl git rsync
+
+      # ------------------------------------------------------------------
+      - name: Descargar archivos del repositorio
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      - name: Configurar la imagen
+        run: |
+          lb config \
+            --mode debian \
+            --distribution bookworm \
+            --architecture amd64 \
+            --binary-images iso-hybrid \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --debian-installer none \
+            --memtest none \
+            --firmware-chroot true \
+            --firmware-binary true \
+            --apt-recommends true \
+            --iso-application "Meridian OS" \
+            --iso-publisher "Meridian Systems" \
+            --iso-volume "Meridian OS 1.0" \
+            --bootappend-live "boot=live components quiet splash username=meridian user-fullname=Meridian hostname=meridian locales=es_PE.UTF-8 keyboard-layouts=latam timezone=America/Lima"
+
+      # ------------------------------------------------------------------
+      - name: Lista de paquetes — sistema base
+        run: |
+          mkdir -p config/package-lists
+          cat > config/package-lists/00-system.list.chroot << 'EOF'
+          linux-image-amd64
+          firmware-linux
+          firmware-iwlwifi
+          firmware-realtek
+          firmware-atheros
+          network-manager
+          network-manager-gnome
+          sudo
+          policykit-1
+          plymouth
+          plymouth-themes
+          plymouth-label
+          dbus-x11
+          locales
+          console-setup
+          EOF
+
+      - name: Lista de paquetes — escritorio XFCE
+        run: |
+          cat > config/package-lists/10-desktop.list.chroot << 'EOF'
+          xfce4
+          xfce4-terminal
+          xfce4-power-manager
+          xfce4-screenshooter
+          xfce4-notifyd
+          xfce4-pulseaudio-plugin
+          thunar-archive-plugin
+          thunar-volman
+          lightdm
+          lightdm-gtk-greeter
+          lightdm-gtk-greeter-settings
+          papirus-icon-theme
+          gnome-themes-extra
+          fonts-inter
+          fonts-jetbrains-mono
+          fonts-noto-color-emoji
+          pipewire-audio
+          pavucontrol
+          EOF
+
+      - name: Lista de paquetes — aplicaciones de trabajo
+        run: |
+          cat > config/package-lists/20-apps.list.chroot << 'EOF'
+          firefox-esr
+          firefox-esr-l10n-es-es
+          libreoffice
+          libreoffice-gtk3
+          libreoffice-l10n-es
+          thunderbird
+          thunderbird-l10n-es-es
+          evince
+          ristretto
+          gimp
+          keepassxc
+          remmina
+          remmina-plugin-rdp
+          remmina-plugin-vnc
+          file-roller
+          gnome-disk-utility
+          gparted
+          cups
+          system-config-printer
+          EOF
+
+      - name: Lista de paquetes — instalador grafico
+        run: |
+          cat > config/package-lists/30-installer.list.chroot << 'EOF'
+          calamares
+          calamares-settings-debian
+          qml-module-qtquick2
+          qml-module-qtquick-controls
+          qml-module-qtquick-layouts
+          qml-module-qtquick-window2
+          EOF
+
+      # ------------------------------------------------------------------
+      # La carpeta files/ refleja exactamente la raiz del sistema, asi que
+      # una sola copia recursiva coloca todo en su sitio.
+      # ------------------------------------------------------------------
+      - name: Copiar archivos de marca y configuracion
+        run: |
+          mkdir -p config/includes.chroot
+          cp -r files/. config/includes.chroot/
+          echo "--- Contenido copiado ---"
+          find config/includes.chroot -type f | sort
+
+      # ------------------------------------------------------------------
+      - name: Hooks de configuracion del sistema
+        run: |
+          mkdir -p config/hooks/normal
+
+          # ---- 100: permisos y contrasena de root ----
+          cat > config/hooks/normal/100-sistema.hook.chroot << 'HOOK'
+          #!/bin/sh
+          set -e
+          echo "root:meridian" | chpasswd
+          chmod +x /usr/local/bin/meridian-welcome
+          HOOK
+
+          # ---- 200: Calamares usa nuestra marca ----
+          cat > config/hooks/normal/200-calamares.hook.chroot << 'HOOK'
+          #!/bin/sh
+          set -e
+          if [ -f /etc/calamares/settings.conf ]; then
+              sed -i 's/^branding:.*/branding: meridian/' /etc/calamares/settings.conf
+          fi
+          # Permitir lanzar el instalador sin pedir contrasena en la sesion viva
+          mkdir -p /etc/polkit-1/localauthority/50-local.d
+          cat > /etc/polkit-1/localauthority/50-local.d/99-calamares.pkla << 'PKLA'
+          [Permitir Calamares]
+          Identity=unix-group:sudo
+          Action=org.freedesktop.policykit.exec
+          ResultActive=yes
+          PKLA
+          HOOK
+
+          # ---- 300: tema de arranque Plymouth ----
+          cat > config/hooks/normal/300-plymouth.hook.chroot << 'HOOK'
+          #!/bin/sh
+          set -e
+          if command -v plymouth-set-default-theme > /dev/null 2>&1; then
+              plymouth-set-default-theme spinner || true
+              update-initramfs -u || true
+          fi
+          HOOK
+
+          # ---- 400: idioma y zona horaria ----
+          cat > config/hooks/normal/400-locale.hook.chroot << 'HOOK'
+          #!/bin/sh
+          set -e
+          echo "es_PE.UTF-8 UTF-8" >> /etc/locale.gen
+          echo "es_ES.UTF-8 UTF-8" >> /etc/locale.gen
+          echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+          locale-gen
+          HOOK
+
+          # ---- 500: cache de iconos y accesos directos del escritorio ----
+          cat > config/hooks/normal/500-escritorio.hook.chroot << 'HOOK'
+          #!/bin/sh
+          set -e
+          gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
+          update-desktop-database 2>/dev/null || true
+
+          # Iconos visibles en el escritorio del usuario
+          mkdir -p /etc/skel/Escritorio
+          for d in meridian-install firefox-esr thunar; do
+              [ -f "/usr/share/applications/$d.desktop" ] && \
+                  cp "/usr/share/applications/$d.desktop" /etc/skel/Escritorio/ || true
+          done
+          chmod +x /etc/skel/Escritorio/*.desktop 2>/dev/null || true
+          HOOK
+
+          chmod +x config/hooks/normal/*.hook.chroot
+          ls -la config/hooks/normal/
+
+      # ------------------------------------------------------------------
+      - name: Construir la ISO
+        run: lb build
+
+      # ------------------------------------------------------------------
+      - name: Preparar la entrega
+        run: |
+          ISO_FILE=$(ls *.iso | head -n1)
+          mv "$ISO_FILE" meridian-os-1.0-amd64.iso
+          sha256sum meridian-os-1.0-amd64.iso > meridian-os-1.0-amd64.iso.sha256
+          echo "### Meridian OS 1.0 construido" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh meridian-os-1.0-amd64.iso >> $GITHUB_STEP_SUMMARY
+          cat meridian-os-1.0-amd64.iso.sha256 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Publicar la ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-os-iso
+          path: |
+            meridian-os-1.0-amd64.iso
+            meridian-os-1.0-amd64.iso.sha256
+          retention-days: 30
