@@ -1,1 +1,37 @@
+#!/bin/sh
+# meridian-set-wallpaper
+#
+# XFCE guarda la ruta del fondo de pantalla bajo una clave que incluye el
+# NOMBRE REAL del monitor (ej. "monitorVGA-1", "monitoreDP-1"), que cambia
+# segun el hardware y el driver de video. Un xfce4-desktop.xml estatico con
+# un nombre inventado ("monitor0") simplemente no coincide con nada y XFCE
+# no muestra ningun fondo. Este script detecta los monitores reales con
+# xrandr y aplica el fondo a cada uno, en cada espacio de trabajo.
 
+sleep 2  # dar tiempo a que xfdesktop termine de arrancar
+
+WALLPAPER="/usr/share/backgrounds/meridian-wallpaper.png"
+[ -f "$WALLPAPER" ] || exit 0
+
+WORKSPACES=$(xfconf-query -c xfwm4 -p /general/workspace_count 2>/dev/null)
+case "$WORKSPACES" in
+    ''|*[!0-9]*) WORKSPACES=2 ;;
+esac
+
+MONITORES=$(xrandr --query 2>/dev/null | awk '/ connected/{print $1}')
+[ -z "$MONITORES" ] && MONITORES="0"
+
+for MONITOR in $MONITORES; do
+    W=0
+    while [ "$W" -lt "$WORKSPACES" ]; do
+        xfconf-query -c xfce4-desktop \
+            -p "/backdrop/screen0/monitor${MONITOR}/workspace${W}/last-image" \
+            --create -t string -s "$WALLPAPER" 2>/dev/null
+
+        xfconf-query -c xfce4-desktop \
+            -p "/backdrop/screen0/monitor${MONITOR}/workspace${W}/image-style" \
+            --create -t int -s 5 2>/dev/null
+
+        W=$((W + 1))
+    done
+done
